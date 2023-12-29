@@ -43,7 +43,7 @@ jobs:
     permissions:
       id-token: write
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'created'
+    if: contains(github.ref, 'refs/tags/')
     steps:
     - uses: actions/download-artifact@v3
       with:
