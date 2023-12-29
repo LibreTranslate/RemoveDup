@@ -2,26 +2,23 @@
 
 std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const std::string &tgt){
     #if defined(_WIN32) || defined(_WIN64)
-    HANDLE file_handle = CreateFile(file_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE file_handle = CreateFile(src.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file_handle == INVALID_HANDLE_VALUE) {
-        std::cerr << "Error: Unable to open file." << std::endl;
-        return 1;
+        throw std::runtime_error("Unable to open " + src);
     }
 
     DWORD file_size = GetFileSize(file_handle, NULL);
     HANDLE file_mapping = CreateFileMapping(file_handle, NULL, PAGE_READONLY, 0, 0, NULL);
     if (file_mapping == NULL) {
-        std::cerr << "Error: File mapping failed." << std::endl;
         CloseHandle(file_handle);
-        return 1;
+        throw std::runtime_error("File mapping failed.");
     }
 
     const char* file_data = static_cast<const char*>(MapViewOfFile(file_mapping, FILE_MAP_READ, 0, 0, file_size));
     if (file_data == NULL) {
-        std::cerr << "Error: Memory mapping failed." << std::endl;
         CloseHandle(file_mapping);
         CloseHandle(file_handle);
-        return 1;
+        throw std::runtime_error("Memory mapping failed.");
     }
 #else
     int fd = open(src.c_str(), O_RDONLY);
@@ -65,7 +62,7 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
             line_end = ptr + 1;
             std::string_view line_view(line_start, line_end - line_start);
 
-            std::uint32_t hash = xxh32::hash(line_start, line_end - line_start, 0);
+            std::uint32_t hash = xxh32::hash(line_start, static_cast<uint32_t>(line_end - line_start), 0);
             auto range = lines.equal_range(hash);
 
             bool line_exists = false;
