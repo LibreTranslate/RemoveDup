@@ -27,7 +27,7 @@ print(src, tgt, removed)
 Source and target must have the same number of lines. No validation checks are made.
 
 Duplication checks are only made on the source content. If you want to check for duplicates on the target, simply switch the order of the parameters.
-is
+
 ## Build
 
 ```bash
