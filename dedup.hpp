@@ -5,6 +5,7 @@
 #include <cstring>
 #include <tuple>
 #include <variant>
+#include <string>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
