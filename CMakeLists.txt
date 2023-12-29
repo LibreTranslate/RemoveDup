@@ -14,7 +14,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 if (WITH_PYTHON)
-set(PYBIND11_FINDPYTHON ON)
 add_subdirectory(vendor/pybind11)
 add_definitions("-DVERSION_INFO=${VERSION_INFO}")
 pybind11_add_module(removedup removedup.cpp dedup.cpp)
