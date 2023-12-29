@@ -3,7 +3,7 @@
 #include "dedup.hpp"
 
 int main(int argc, char **argv) {
-    cxxopts::Options options("removedup", "Remove duplicates from bitext datasets");
+    cxxopts::Options options("rdup", "Remove duplicates from parallel corpora");
     options.add_options()
         ("s,src", "Input source corpus", cxxopts::value<std::string>())
         ("t,tgt", "Input target corpus", cxxopts::value<std::string>())

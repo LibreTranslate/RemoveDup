@@ -1,0 +1,6 @@
+include README.md LICENSE vendor/pybind11/LICENSE
+graft vendor/pybind11/include
+graft vendor/pybind11/tools
+graft *.cpp
+graft *.hpp
+global-include CMakeLists.txt *.cmake
