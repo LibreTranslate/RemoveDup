@@ -77,7 +77,7 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
                 lines.emplace(hash, line_view);
                 
                 src_of << line_view;
-                tgt_of << line_buf << "\n";
+                tgt_of << line_buf << (*ptr == '\n' ? "\n" : "");
             }else{
                 removed++;
             }
