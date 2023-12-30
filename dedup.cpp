@@ -75,8 +75,12 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
 
             if (!line_exists) {
                 lines.emplace(hash, line_view);
-                
-                src_of << line_view;
+                if (*(ptr - 1) == '\r'){
+                    std::string_view lv(line_start, line_end - line_start - 2);
+                    src_of << lv << "\n";
+                }else{
+                    src_of << line_view;
+                }
                 tgt_of << line_buf << (*ptr == '\n' ? "\n" : "");
             }else{
                 removed++;
