@@ -1,5 +1,6 @@
 #include "dedup.hpp"
 
+
 std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const std::string &tgt){
     #if defined(_WIN32) || defined(_WIN64)
     HANDLE file_handle = CreateFile(src.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -7,7 +8,9 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
         throw std::runtime_error("Unable to open " + src);
     }
 
-    DWORD file_size = GetFileSize(file_handle, NULL);
+    LARGE_INTEGER li;
+    GetFileSizeEx(file_handle, &li);
+    SIZE_T file_size = li.QuadPart;
     HANDLE file_mapping = CreateFileMapping(file_handle, NULL, PAGE_READONLY, 0, 0, NULL);
     if (file_mapping == NULL) {
         CloseHandle(file_handle);
@@ -41,9 +44,9 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
 
     std::unordered_multimap<std::uint32_t, std::string_view> lines;
 
-    std::ifstream tgt_is(tgt);
-    if (!tgt_is.is_open()) throw std::runtime_error("Cannot open " + tgt);
-
+    FILE* tgt_fp = fopen(tgt.c_str(), "rb");
+    if (tgt_fp == NULL) throw std::runtime_error("Cannot open " + tgt);
+    
     std::string src_out = src + ".dedup";
     std::string tgt_out = tgt + ".dedup";
 
@@ -52,12 +55,14 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
 
     const char* line_start = file_data;
     const char* line_end = file_data;
-    std::string line_buf = "";
+
+    const int BUF_SIZE = 4096;
+    char line_buf[BUF_SIZE];
     size_t removed = 0;
 
     for (const char* ptr = file_data; ptr < file_data + file_size; ++ptr) {
         if (*ptr == '\n' || ptr == file_data + file_size - 1) {
-            std::getline(tgt_is, line_buf);
+            fgets(line_buf, BUF_SIZE, tgt_fp);
 
             line_end = ptr + 1;
             std::string_view line_view(line_start, line_end - line_start);
@@ -77,11 +82,11 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
                 lines.emplace(hash, line_view);
                 if (*(ptr - 1) == '\r'){
                     std::string_view lv(line_start, line_end - line_start - 2);
-                    src_of << lv << "\n";
+                    src_of << lv << "\r\n";
                 }else{
                     src_of << line_view;
                 }
-                tgt_of << line_buf << (*ptr == '\n' ? "\n" : "");
+                tgt_of << line_buf;
             }else{
                 removed++;
             }
@@ -101,6 +106,7 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
 
     src_of.close();
     tgt_of.close();
+    fclose(tgt_fp);
 
     return std::make_tuple(src_out, tgt_out, removed);
 }
