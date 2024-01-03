@@ -28,8 +28,6 @@ Source and target must have the same number of lines. No validation checks are m
 
 Duplication checks are only made on the source content. If you want to check for duplicates on the target, simply switch the order of the parameters.
 
-Target lines must be less than 4096 characters in length.
-
 ## Build
 
 ```bash

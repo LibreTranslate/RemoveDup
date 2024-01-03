@@ -124,7 +124,7 @@ class CMakeBuild(build_ext):
 
 setup(
     name="removedup",
-    version="1.0.5",
+    version="1.0.6",
     author="Piero Toffanin",
     author_email="pt@masseranolabs.com",
     url="https://github.com/LibreTranslate/RemoveDUP",

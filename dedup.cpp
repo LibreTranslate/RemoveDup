@@ -7,7 +7,9 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
         throw std::runtime_error("Unable to open " + src);
     }
 
-    DWORD file_size = GetFileSize(file_handle, NULL);
+    LARGE_INTEGER li;
+    GetFileSizeEx(file_handle, &li);
+    SIZE_T file_size = li.QuadPart;
     HANDLE file_mapping = CreateFileMapping(file_handle, NULL, PAGE_READONLY, 0, 0, NULL);
     if (file_mapping == NULL) {
         CloseHandle(file_handle);
@@ -41,7 +43,7 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
 
     std::unordered_multimap<std::uint32_t, std::string_view> lines;
 
-    std::ifstream tgt_is(tgt);
+    std::ifstream tgt_is(tgt, std::ios_base::in | std::ios_base::binary);
     if (!tgt_is.is_open()) throw std::runtime_error("Cannot open " + tgt);
 
     std::string src_out = src + ".dedup";
