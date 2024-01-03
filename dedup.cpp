@@ -18,7 +18,7 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
     std::string line_s = "";
     std::string line_t = "";
     size_t removed = 0;
-    
+
     while(true) {
         std::getline(src_if, line_s);
         std::getline(tgt_if, line_t);
@@ -34,8 +34,6 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
         }else{
             removed++;
         }
-
-        
     }
 
     src_of.close();
