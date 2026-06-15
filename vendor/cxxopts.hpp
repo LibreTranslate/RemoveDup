@@ -27,6 +27,9 @@ THE SOFTWARE.
 #ifndef CXXOPTS_HPP_INCLUDED
 #define CXXOPTS_HPP_INCLUDED
 
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -55,8 +58,8 @@ THE SOFTWARE.
 #define CXXOPTS_LINKONCE_CONST	__declspec(selectany) extern
 #define CXXOPTS_LINKONCE		__declspec(selectany) extern
 #else
-#define CXXOPTS_LINKONCE_CONST	
-#define CXXOPTS_LINKONCE		
+#define CXXOPTS_LINKONCE_CONST
+#define CXXOPTS_LINKONCE
 #endif
 
 #ifndef CXXOPTS_NO_REGEX
@@ -71,6 +74,20 @@ THE SOFTWARE.
 #      define CXXOPTS_HAS_OPTIONAL
 #    endif
 #  endif
+#  if __has_include(<filesystem>)
+#    include <filesystem>
+#    ifdef __cpp_lib_filesystem
+#      define CXXOPTS_HAS_FILESYSTEM
+#    endif
+#  endif
+#endif
+
+#define CXXOPTS_FALLTHROUGH
+#ifdef __has_cpp_attribute
+  #if __has_cpp_attribute(fallthrough)
+    #undef CXXOPTS_FALLTHROUGH
+    #define CXXOPTS_FALLTHROUGH [[fallthrough]]
+  #endif
 #endif
 
 #if __cplusplus >= 201603L
@@ -84,7 +101,7 @@ THE SOFTWARE.
 #endif
 
 #define CXXOPTS__VERSION_MAJOR 3
-#define CXXOPTS__VERSION_MINOR 1
+#define CXXOPTS__VERSION_MINOR 3
 #define CXXOPTS__VERSION_PATCH 1
 
 #if (__GNUC__ < 10 || (__GNUC__ == 10 && __GNUC_MINOR__ < 1)) && __GNUC__ >= 6
@@ -230,10 +247,10 @@ stringAppend(String& s, Iterator begin, Iterator end)
 }
 
 inline
-std::size_t
+size_t
 stringLength(const String& s)
 {
-  return s.length();
+  return static_cast<size_t>(s.length());
 }
 
 inline
@@ -337,13 +354,8 @@ empty(const std::string& s)
 namespace cxxopts {
 
 namespace {
-#ifdef _WIN32
 CXXOPTS_LINKONCE_CONST std::string LQUOTE("\'");
 CXXOPTS_LINKONCE_CONST std::string RQUOTE("\'");
-#else
-CXXOPTS_LINKONCE_CONST std::string LQUOTE("‘");
-CXXOPTS_LINKONCE_CONST std::string RQUOTE("’");
-#endif
 } // namespace
 
 // GNU GCC with -Weffc++ will issue a warning regarding the upcoming class, we
@@ -352,6 +364,16 @@ CXXOPTS_LINKONCE_CONST std::string RQUOTE("’");
 // destructor This will be ignored under other compilers like LLVM clang.
 CXXOPTS_DIAGNOSTIC_PUSH
 CXXOPTS_IGNORE_WARNING("-Wnon-virtual-dtor")
+
+enum class ImplicitArgPolicy {
+  Disabled,
+  Enabled
+};
+
+enum class PositionalMode {
+  Replace,
+  Append
+};
 
 // some older versions of GCC warn under this warning
 CXXOPTS_IGNORE_WARNING("-Weffc++")
@@ -364,6 +386,9 @@ class Value : public std::enable_shared_from_this<Value>
   virtual
   std::shared_ptr<Value>
   clone() const = 0;
+
+  virtual void
+  add(const std::string& text) const = 0;
 
   virtual void
   parse(const std::string& text) const = 0;
@@ -380,6 +405,9 @@ class Value : public std::enable_shared_from_this<Value>
   virtual bool
   has_implicit() const = 0;
 
+  virtual bool
+  has_disabled_args() const = 0;
+
   virtual std::string
   get_default_value() const = 0;
 
@@ -390,7 +418,7 @@ class Value : public std::enable_shared_from_this<Value>
   default_value(const std::string& value) = 0;
 
   virtual std::shared_ptr<Value>
-  implicit_value(const std::string& value) = 0;
+  implicit_value(const std::string& value, ImplicitArgPolicy arg_policy = ImplicitArgPolicy::Enabled) = 0;
 
   virtual std::shared_ptr<Value>
   no_implicit_value() = 0;
@@ -464,6 +492,15 @@ class invalid_option_syntax : public parsing {
   explicit invalid_option_syntax(const std::string& text)
   : parsing("Argument " + LQUOTE + text + RQUOTE +
             " starts with a - but has incorrect syntax")
+  {
+  }
+};
+
+class specified_disabled_args : public parsing {
+  public:
+  explicit specified_disabled_args(const std::string& text)
+  : parsing("Option " + LQUOTE + text + RQUOTE +
+            " has disabled_args but argument was specified")
   {
   }
 };
@@ -658,6 +695,16 @@ inline bool IsFalseText(const std::string &text)
   return false;
 }
 
+static inline bool valid_option_later_char(char c)
+{
+  return c!='=' && c!=',' && !std::isspace(c, std::locale::classic()) && !std::iscntrl(c, std::locale::classic());
+}
+
+static inline bool valid_option_first_char(char c)
+{
+  return c != '-' && valid_option_later_char(c);
+}
+
 inline OptionNames split_option_names(const std::string &text)
 {
   OptionNames split_names;
@@ -678,24 +725,26 @@ inline OptionNames split_option_names(const std::string &text)
     }
     token_start_pos = next_non_space_pos;
     auto next_delimiter_pos = text.find(',', token_start_pos);
-    if (next_delimiter_pos == token_start_pos) {
-      throw_or_mimic<exceptions::invalid_option_format>(text);
-    }
+
     if (next_delimiter_pos == npos) {
       next_delimiter_pos = length;
     }
+    else if (next_delimiter_pos == token_start_pos) {
+      throw_or_mimic<exceptions::invalid_option_format>(text);
+    }
+    else if(next_delimiter_pos == length-1) {
+      // delimter at the end. ex : "a,ab,"
+      throw_or_mimic<exceptions::invalid_option_format>(text);
+    }
     auto token_length = next_delimiter_pos - token_start_pos;
-    // validate the token itself matches the regex /([:alnum:][-_[:alnum:]]*/
     {
-      const char* option_name_valid_chars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz"
-        "0123456789"
-        "_-.?";
-
-      if (!std::isalnum(text[token_start_pos], std::locale::classic()) ||
-          text.find_first_not_of(option_name_valid_chars, token_start_pos) < next_delimiter_pos) {
+      if(!valid_option_first_char(text[token_start_pos])){
         throw_or_mimic<exceptions::invalid_option_format>(text);
+      }
+      for(size_t i=token_start_pos+1; i<next_delimiter_pos; ++i){
+        if(!valid_option_later_char(text[i])) {
+          throw_or_mimic<exceptions::invalid_option_format>(text);
+        }
       }
     }
     split_names.emplace_back(text.substr(token_start_pos, token_length));
@@ -712,11 +761,11 @@ inline ArguDesc ParseArgument(const char *arg, bool &matched)
   if (strncmp(pdata, "--", 2) == 0)
   {
     pdata += 2;
-    if (isalnum(*pdata, std::locale::classic()))
+    if (valid_option_first_char(*pdata))
     {
       argu_desc.arg_name.push_back(*pdata);
       pdata += 1;
-      while (isalnum(*pdata, std::locale::classic()) || *pdata == '-' || *pdata == '_')
+      while (valid_option_later_char(*pdata))
       {
         argu_desc.arg_name.push_back(*pdata);
         pdata += 1;
@@ -743,13 +792,19 @@ inline ArguDesc ParseArgument(const char *arg, bool &matched)
   else if (strncmp(pdata, "-", 1) == 0)
   {
     pdata += 1;
-    argu_desc.grouping = true;
-    while (isalnum(*pdata, std::locale::classic()))
-    {
-      argu_desc.arg_name.push_back(*pdata);
-      pdata += 1;
+    if(valid_option_first_char(*pdata)) {
+      // If we have '=' right after first alnum, its a match.
+      if(*(pdata+1) == '=') {
+        argu_desc.arg_name.push_back(*pdata);
+        argu_desc.set_value = true;
+        argu_desc.value = std::string(pdata+2);
+      }
+      else{
+        argu_desc.arg_name = std::string(pdata);
+      }
+      argu_desc.grouping = true;
+      matched = true;
     }
-    matched = !argu_desc.arg_name.empty() && *pdata == '\0';
   }
   return argu_desc;
 }
@@ -757,30 +812,58 @@ inline ArguDesc ParseArgument(const char *arg, bool &matched)
 #else  // CXXOPTS_NO_REGEX
 
 namespace {
+
+#define CXXOPTS_RE_NAME_START "[^-=,[:space:][:cntrl:]]"
+#define CXXOPTS_RE_NAME_CHAR "[^=,[:space:][:cntrl:]]"
+#define CXXOPTS_RE_NAME CXXOPTS_RE_NAME_START CXXOPTS_RE_NAME_CHAR "*"
+#define CXXOPTS_RE_LONG_NAME CXXOPTS_RE_NAME_START CXXOPTS_RE_NAME_CHAR "+"
+#define CXXOPTS_RE_SHORT_NAME CXXOPTS_RE_NAME_START
+
 CXXOPTS_LINKONCE
-std::basic_regex<char> integer_pattern
-  ("(-)?(0x)?([0-9a-zA-Z]+)|((0x)?0)");
+const char* const integer_pattern =
+  "(-)?(0x)?([0-9a-zA-Z]+)|((0x)?0)";
 CXXOPTS_LINKONCE
-std::basic_regex<char> truthy_pattern
-  ("(t|T)(rue)?|1");
+const char* const truthy_pattern =
+  "(t|T)(rue)?|1";
 CXXOPTS_LINKONCE
-std::basic_regex<char> falsy_pattern
-  ("(f|F)(alse)?|0");
+const char* const falsy_pattern =
+  "(f|F)(alse)?|0";
 CXXOPTS_LINKONCE
-std::basic_regex<char> option_matcher
-  ("--([[:alnum:]][-_[:alnum:]\\.]+)(=(.*))?|-([[:alnum:]].*)");
+const char* const option_pattern =
+  "--(" CXXOPTS_RE_LONG_NAME ")(=(.*))?|-(" CXXOPTS_RE_SHORT_NAME ")((=(.*))|(.*))";
+// <-------Long Option--------------->  <-------------Short Option--------------->
+// Groups :
+//   <---------1--------------><--2-->   <-----------4-------------><-----5------>
+//                               <-3>                                <--6--> <-8>
+//                                                                         <-7>
+const int LONG_NAME_IDX=1;
+const int LONG_MATCH_IDX=2;
+const int LONG_MATCH_VALUE_IDX=3;
+const int SHORT_NAME_IDX=4;
+const int SHORT_MATCH_IDX=6;
+const int SHORT_MATCH_VALUE_IDX=7;
+const int SHORT_GROUPING_IDX=8;
+
 CXXOPTS_LINKONCE
-std::basic_regex<char> option_specifier
-  ("([[:alnum:]][-_[:alnum:]\\.]*)(,[ ]*[[:alnum:]][-_[:alnum:]]*)*");
+const char* const option_specifier_pattern =
+  "(" CXXOPTS_RE_NAME ")(,[ ]*" CXXOPTS_RE_NAME ")*";
 CXXOPTS_LINKONCE
-std::basic_regex<char> option_specifier_separator(", *");
+const char* const option_specifier_separator_pattern = ", *";
+
+#undef CXXOPTS_RE_NAME_START
+#undef CXXOPTS_RE_NAME_CHAR
+#undef CXXOPTS_RE_NAME
+#undef CXXOPTS_RE_LONG_NAME
+#undef CXXOPTS_RE_SHORT_NAME
 
 } // namespace
 
 inline IntegerDesc SplitInteger(const std::string &text)
 {
+  static const std::basic_regex<char> integer_matcher(integer_pattern);
+
   std::smatch match;
-  std::regex_match(text, match, integer_pattern);
+  std::regex_match(text, match, integer_matcher);
 
   if (match.length() == 0)
   {
@@ -804,15 +887,17 @@ inline IntegerDesc SplitInteger(const std::string &text)
 
 inline bool IsTrueText(const std::string &text)
 {
+  static const std::basic_regex<char> truthy_matcher(truthy_pattern);
   std::smatch result;
-  std::regex_match(text, result, truthy_pattern);
+  std::regex_match(text, result, truthy_matcher);
   return !result.empty();
 }
 
 inline bool IsFalseText(const std::string &text)
 {
+  static const std::basic_regex<char> falsy_matcher(falsy_pattern);
   std::smatch result;
-  std::regex_match(text, result, falsy_pattern);
+  std::regex_match(text, result, falsy_matcher);
   return !result.empty();
 }
 
@@ -821,35 +906,46 @@ inline bool IsFalseText(const std::string &text)
 // (without considering which or how many are single-character)
 inline OptionNames split_option_names(const std::string &text)
 {
-  if (!std::regex_match(text.c_str(), option_specifier))
+  static const std::basic_regex<char> option_specifier_matcher(option_specifier_pattern);
+  if (!std::regex_match(text.c_str(), option_specifier_matcher))
   {
     throw_or_mimic<exceptions::invalid_option_format>(text);
   }
 
   OptionNames split_names;
 
+  static const std::basic_regex<char> option_specifier_separator_matcher(option_specifier_separator_pattern);
   constexpr int use_non_matches { -1 };
   auto token_iterator = std::sregex_token_iterator(
-    text.begin(), text.end(), option_specifier_separator, use_non_matches);
+    text.begin(), text.end(), option_specifier_separator_matcher, use_non_matches);
   std::copy(token_iterator, std::sregex_token_iterator(), std::back_inserter(split_names));
   return split_names;
 }
 
 inline ArguDesc ParseArgument(const char *arg, bool &matched)
 {
+  static const std::basic_regex<char> option_matcher(option_pattern);
   std::match_results<const char*> result;
   std::regex_match(arg, result, option_matcher);
   matched = !result.empty();
 
   ArguDesc argu_desc;
   if (matched) {
-    argu_desc.arg_name = result[1].str();
-    argu_desc.set_value = result[2].length() > 0;
-    argu_desc.value = result[3].str();
-    if (result[4].length() > 0)
+    if(result[LONG_NAME_IDX].length() > 0) {
+      argu_desc.arg_name = result[LONG_NAME_IDX].str();
+      argu_desc.set_value = result[LONG_MATCH_IDX].length() > 0;
+      argu_desc.value = result[LONG_MATCH_VALUE_IDX].str();
+    }
+    else if (result[SHORT_NAME_IDX].length() > 0)
     {
       argu_desc.grouping = true;
-      argu_desc.arg_name = result[4].str();
+      argu_desc.arg_name = result[SHORT_NAME_IDX].str();
+      if(result[SHORT_MATCH_IDX].length() > 0){
+        argu_desc.set_value = true;
+        argu_desc.value = result[SHORT_MATCH_VALUE_IDX].str();
+      } else {
+        argu_desc.arg_name += result[SHORT_GROUPING_IDX].str();
+      }
     }
   }
 
@@ -902,6 +998,27 @@ void
 check_signed_range(bool negative, U value, const std::string& text)
 {
   SignedCheck<T, std::numeric_limits<T>::is_signed>()(negative, value, text);
+}
+
+template <typename T>
+void
+floating_point_parser(const std::string& text, T& value, T (*parser)(const char*, char**))
+{
+  if (text.empty())
+  {
+    throw_or_mimic<exceptions::incorrect_argument_type>(text);
+  }
+
+  char* end = nullptr;
+  errno = 0;
+  const auto result = parser(text.c_str(), &end);
+
+  if (end == text.c_str() || errno == ERANGE)
+  {
+    throw_or_mimic<exceptions::incorrect_argument_type>(text);
+  }
+
+  value = result;
 }
 
 } // namespace detail
@@ -959,13 +1076,30 @@ integer_parser(const std::string& text, T& value)
       throw_or_mimic<exceptions::incorrect_argument_type>(text);
     }
 
-    const US next = static_cast<US>(result * base + digit);
-    if (result > next)
+    US limit = 0;
+    if (negative)
+    {
+      // |min| equals max + 1 for two's-complement signed types; computing it
+      // via std::abs(min) is undefined behaviour (e.g. abs(INT64_MIN)). Build
+      // the same value in unsigned arithmetic instead. For unsigned T this
+      // intentionally wraps to 0, matching the previous std::abs(0) result.
+      limit = static_cast<US>(static_cast<US>((std::numeric_limits<T>::max)()) + US{1});
+    }
+    else
+    {
+      limit = (std::numeric_limits<T>::max)();
+    }
+
+    if (base != 0 && result > limit / base)
+    {
+      throw_or_mimic<exceptions::incorrect_argument_type>(text);
+    }
+    if (result * base > limit - digit)
     {
       throw_or_mimic<exceptions::incorrect_argument_type>(text);
     }
 
-    result = next;
+    result = static_cast<US>(result * base + digit);
   }
 
   detail::check_signed_range<T>(negative, result, text);
@@ -1024,6 +1158,27 @@ parse_value(const std::string& text, std::string& value)
   value = text;
 }
 
+inline
+void
+parse_value(const std::string& text, float& value)
+{
+  detail::floating_point_parser(text, value, std::strtof);
+}
+
+inline
+void
+parse_value(const std::string& text, double& value)
+{
+  detail::floating_point_parser(text, value, std::strtod);
+}
+
+inline
+void
+parse_value(const std::string& text, long double& value)
+{
+  detail::floating_point_parser(text, value, std::strtold);
+}
+
 // The fallback parser. It uses the stringstream parser to parse all types
 // that have not been overloaded explicitly.  It has to be placed in the
 // source code before all other more specialized templates.
@@ -1033,25 +1188,6 @@ template <typename T,
 void
 parse_value(const std::string& text, T& value) {
   stringstream_parser(text, value);
-}
-
-template <typename T>
-void
-parse_value(const std::string& text, std::vector<T>& value)
-{
-  if (text.empty()) {
-    T v;
-    parse_value(text, v);
-    value.emplace_back(std::move(v));
-    return;
-  }
-  std::stringstream in(text);
-  std::string token;
-  while(!in.eof() && std::getline(in, token, CXXOPTS_VECTOR_DELIMITER)) {
-    T v;
-    parse_value(token, v);
-    value.emplace_back(std::move(v));
-  }
 }
 
 #ifdef CXXOPTS_HAS_OPTIONAL
@@ -1065,6 +1201,15 @@ parse_value(const std::string& text, std::optional<T>& value)
 }
 #endif
 
+#ifdef CXXOPTS_HAS_FILESYSTEM
+inline
+void
+parse_value(const std::string& text, std::filesystem::path& value)
+{
+  value.assign(text);
+}
+#endif
+
 inline
 void parse_value(const std::string& text, char& c)
 {
@@ -1074,6 +1219,38 @@ void parse_value(const std::string& text, char& c)
   }
 
   c = text[0];
+}
+
+template<typename T> void add_value(const std::string& text, std::vector<T>& value);
+
+template <typename T>
+void
+parse_value(const std::string& text, std::vector<T>& value)
+{
+  if (text.empty()) {
+    return;
+  }
+  std::stringstream in(text);
+  std::string token;
+  while(!in.eof() && std::getline(in, token, CXXOPTS_VECTOR_DELIMITER)) {
+    add_value(token, value);
+  }
+}
+
+template <typename T>
+void
+add_value(const std::string& text, T& value)
+{
+  parse_value(text, value);
+}
+
+template <typename T>
+void
+add_value(const std::string& text, std::vector<T>& value)
+{
+  T v;
+  add_value(text, v);
+  value.emplace_back(std::move(v));
 }
 
 template <typename T>
@@ -1128,6 +1305,12 @@ class abstract_value : public Value
   }
 
   void
+  add(const std::string& text) const override
+  {
+    add_value(text, *m_store);
+  }
+
+  void
   parse(const std::string& text) const override
   {
     parse_value(text, *m_store);
@@ -1157,6 +1340,12 @@ class abstract_value : public Value
     return m_implicit;
   }
 
+  bool
+  has_disabled_args() const override
+  {
+    return m_implicit && (m_implicit_arg_policy == ImplicitArgPolicy::Disabled);
+  }
+
   std::shared_ptr<Value>
   default_value(const std::string& value) override
   {
@@ -1166,10 +1355,11 @@ class abstract_value : public Value
   }
 
   std::shared_ptr<Value>
-  implicit_value(const std::string& value) override
+  implicit_value(const std::string& value, ImplicitArgPolicy arg_policy = ImplicitArgPolicy::Enabled) override
   {
     m_implicit = true;
     m_implicit_value = value;
+    m_implicit_arg_policy = arg_policy;
     return shared_from_this();
   }
 
@@ -1215,6 +1405,9 @@ class abstract_value : public Value
   bool m_default = false;
   bool m_implicit = false;
 
+  // NOTE: Only meaningful when m_implicit == true
+  ImplicitArgPolicy m_implicit_arg_policy = ImplicitArgPolicy::Enabled;
+
   std::string m_default_value{};
   std::string m_implicit_value{};
 };
@@ -1237,8 +1430,6 @@ template <>
 class standard_value<bool> : public abstract_value<bool>
 {
   public:
-  ~standard_value() override = default;
-
   standard_value()
   {
     set_default_and_implicit();
@@ -1413,6 +1604,19 @@ class OptionValue
 {
   public:
   void
+  add
+  (
+    const std::shared_ptr<const OptionDetails>& details,
+    const std::string& text
+  )
+  {
+    ensure_value(details);
+    ++m_count;
+    m_value->add(text);
+    m_long_names = &details->long_names();
+  }
+
+  void
   parse
   (
     const std::shared_ptr<const OptionDetails>& details,
@@ -1475,6 +1679,18 @@ CXXOPTS_DIAGNOSTIC_POP
 
     return CXXOPTS_RTTI_CAST<const values::standard_value<T>&>(*m_value).get();
   }
+
+#ifdef CXXOPTS_HAS_OPTIONAL
+  template <typename T>
+  std::optional<T>
+  as_optional() const
+  {
+    if (m_value == nullptr) {
+      return std::nullopt;
+    }
+    return as<T>();
+  }
+#endif
 
   private:
   void
@@ -1551,7 +1767,7 @@ class ParseResult
     Iterator(const Iterator&) = default;
 
 // GCC complains about m_iter not being initialised in the member
-// initializer list 
+// initializer list
 CXXOPTS_DIAGNOSTIC_PUSH
 CXXOPTS_IGNORE_WARNING("-Weffc++")
     Iterator(const ParseResult *pr, bool end=false)
@@ -1668,6 +1884,12 @@ CXXOPTS_DIAGNOSTIC_POP
     return viter->second.count();
   }
 
+  bool
+  contains(const std::string& o) const
+  {
+    return static_cast<bool>(count(o));
+  }
+
   const OptionValue&
   operator[](const std::string& option) const
   {
@@ -1687,6 +1909,24 @@ CXXOPTS_DIAGNOSTIC_POP
 
     return viter->second;
   }
+
+#ifdef CXXOPTS_HAS_OPTIONAL
+  template <typename T>
+  std::optional<T>
+  as_optional(const std::string& option) const
+  {
+    auto iter = m_keys.find(option);
+    if (iter != m_keys.end())
+    {
+      auto viter = m_values.find(iter->second);
+      if (viter != m_values.end())
+      {
+        return viter->second.as_optional<T>();
+      }
+    }
+    return std::nullopt;
+  }
+#endif
 
   const std::vector<KeyValue>&
   arguments() const
@@ -1782,7 +2022,7 @@ class OptionParser
   );
 
   void
-  add_to_option(OptionMap::const_iterator iter, const std::string& option, const std::string& arg);
+  add_to_option(const std::shared_ptr<OptionDetails>& value, const std::string& arg);
 
   void
   parse_option
@@ -1921,18 +2161,18 @@ class Options
 
   //parse positional arguments into the given option
   void
-  parse_positional(std::string option);
+  parse_positional(std::string option, PositionalMode mode = PositionalMode::Replace);
 
   void
-  parse_positional(std::vector<std::string> options);
+  parse_positional(std::vector<std::string> options, PositionalMode mode = PositionalMode::Replace);
 
   void
-  parse_positional(std::initializer_list<std::string> options);
+  parse_positional(std::initializer_list<std::string> options, PositionalMode mode = PositionalMode::Replace);
 
   template <typename Iterator>
   void
-  parse_positional(Iterator begin, Iterator end) {
-    parse_positional(std::vector<std::string>{begin, end});
+  parse_positional(Iterator begin, Iterator end, PositionalMode mode = PositionalMode::Replace) {
+    parse_positional(std::vector<std::string>{begin, end}, mode);
   }
 
   std::string
@@ -1985,6 +2225,7 @@ class Options
   std::unordered_set<std::string> m_positional_set{};
 
   //mapping from groups to help options
+  std::vector<std::string> m_group{};
   std::map<std::string, HelpGroupDetails> m_help{};
 };
 
@@ -2015,6 +2256,143 @@ class OptionAdder
 namespace {
 constexpr std::size_t OPTION_LONGEST = 30;
 constexpr std::size_t OPTION_DESC_GAP = 2;
+
+
+
+String
+wrap_text
+(
+  const String& text,
+  std::size_t allowed,
+  std::size_t start = 0 // spaces_to_append_at_newline
+)
+{
+  if(allowed == 0) return String{};
+
+  String result;
+  auto current = std::begin(text);
+  using Iterator = decltype(current);
+
+  auto startLine = current;
+  auto lastSpace = current;
+  auto contentEnd = current;
+  auto lastSpaceContentEnd = current;
+  auto size = std::size_t{};
+
+  bool firstLine = true;
+  const auto textEnd = std::end(text);
+
+  // Loop invariants at the beginning of each iteration:
+  // 1 - [std::begin(text), startLine) is already added to result
+  // 2 - currentLine [startLine, current) is not added to result yet
+  // 3 - size is the number of characters in [startLine, current)
+  //
+  // At every loop we try to include current in the currentLine.
+  // If there is a need to start a new line, we do that first.
+
+  // Treat explicit newlines as whitespace for trimming and break detection.
+  auto is_space = [](Iterator itr) -> bool {
+    return *itr == ' ' || *itr == '\t' || *itr == '\n';
+  };
+
+  // Ensure when calling begin <= end
+  auto add_line = [&firstLine, &result, start](Iterator begin, Iterator end) {
+    // begin == end means empty line
+    // Handle newlines, clamping, everything here
+    if(!firstLine) {
+      stringAppend(result, 1, '\n');
+    }
+
+    // Actual Content
+    if(begin != end) {
+      // Clamp if not the first line
+      if(!firstLine) stringAppend(result, start, ' ');
+      stringAppend(result, begin, end);
+    }
+
+    firstLine = false;
+  };
+
+  // Make the line [itr, current]
+  // It is assumed, as a special case for the below algorithm
+  // that [itr, current] doesn't contains any space.
+  // either its called with itr = std::next(current)
+  // or with an itr <= current in case of word splitting
+  auto reset_line_start = [&size, &startLine, &lastSpace, &contentEnd, &lastSpaceContentEnd, &current](Iterator itr, Iterator lineContentEnd) {
+    startLine = itr;
+    lastSpace = startLine;
+    contentEnd = lineContentEnd;
+    lastSpaceContentEnd = startLine;
+
+    size = std::distance(startLine, std::next(current));
+  };
+
+
+  for (; current != textEnd; ++current)
+  {
+    const auto currentNext = std::next(current);
+
+    if(*current == '\n') {
+      add_line(startLine, contentEnd);
+      reset_line_start(currentNext, currentNext);
+
+      // Last character is a newline. Hence there is another line to be added. An empty one
+      // And we need to do that now as we don't be doing further iterations
+      if(currentNext == textEnd) {
+        add_line(currentNext, currentNext);
+      }
+
+    } else {
+      size ++ ;
+      if(is_space(current)) {
+        lastSpace = current;
+        lastSpaceContentEnd = contentEnd;
+      } else {
+        contentEnd = currentNext;
+      }
+      bool endHere = false;
+      auto endLine = contentEnd;
+      auto nextLineStart = currentNext;
+
+      if(currentNext == textEnd) {
+        endHere = true;
+      }
+      else if(is_space(current) && size == 1) {
+        // Ignore leading spaces
+        reset_line_start(currentNext, currentNext);
+      }
+      else if(size >= allowed && !is_space(currentNext)) {
+        // Don't break. Think of cases 'abc   \nxyz' with allowed=5
+        // we will decide in the next iteration if needed
+        //
+        // Now we know currentNext is not a space:
+        // - if there is no breakable whitespace, we have to split the word
+        // - if the line ends in whitespace, split here
+        // - otherwise split from the last whitespace inside the line
+        if(lastSpace != startLine && lastSpace != current)
+        {
+          endLine = lastSpaceContentEnd;
+          nextLineStart = std::next(lastSpace);
+        }
+
+        // If the chosen break lands right before an explicit newline, let the
+        // newline branch handle it instead of forcing an extra wrapped line.
+        if(*endLine == '\n') {
+          endHere = false;
+        } else {
+          endHere = true;
+        }
+      }
+
+      if(endHere) {
+        add_line(startLine, endLine);
+        reset_line_start(nextLineStart, currentNext);
+      }
+    }
+  }
+
+  return result;
+}
 
 String
 format_option
@@ -2085,7 +2463,6 @@ format_description
     }
   }
 
-  String result;
 
   if (tab_expansion)
   {
@@ -2113,82 +2490,9 @@ format_description
     desc = desc2;
   }
 
-  desc += " ";
-
-  auto current = std::begin(desc);
-  auto previous = current;
-  auto startLine = current;
-  auto lastSpace = current;
-
-  auto size = std::size_t{};
-
-  bool appendNewLine;
-  bool onlyWhiteSpace = true;
-
-  while (current != std::end(desc))
-  {
-    appendNewLine = false;
-    if (*previous == ' ' || *previous == '\t')
-    {
-      lastSpace = current;
-    }
-    if (*current != ' ' && *current != '\t')
-    {
-      onlyWhiteSpace = false;
-    }
-
-    while (*current == '\n')
-    {
-      previous = current;
-      ++current;
-      appendNewLine = true;
-    }
-
-    if (!appendNewLine && size >= allowed)
-    {
-      if (lastSpace != startLine)
-      {
-        current = lastSpace;
-        previous = current;
-      }
-      appendNewLine = true;
-    }
-
-    if (appendNewLine)
-    {
-      stringAppend(result, startLine, current);
-      startLine = current;
-      lastSpace = current;
-
-      if (*previous != '\n')
-      {
-        stringAppend(result, "\n");
-      }
-
-      stringAppend(result, start, ' ');
-
-      if (*previous != '\n')
-      {
-        stringAppend(result, lastSpace, current);
-      }
-
-      onlyWhiteSpace = true;
-      size = 0;
-    }
-
-    previous = current;
-    ++current;
-    ++size;
-  }
-
-  //append whatever is left but ignore whitespace
-  if (!onlyWhiteSpace)
-  {
-    stringAppend(result, startLine, previous);
-  }
-
-  return result;
+  return wrap_text(desc, allowed, start);
 }
+
 
 } // namespace
 
@@ -2229,7 +2533,7 @@ OptionAdder::operator()
     // (length-1) and longer names
   std::string short_name {""};
   auto first_short_name_iter =
-    std::partition(option_names.begin(), option_names.end(),
+    std::stable_partition(option_names.begin(), option_names.end(),
       [&](const std::string& name) { return name.length() > 1; }
     );
   auto num_length_1_names = (option_names.end() - first_short_name_iter);
@@ -2237,6 +2541,7 @@ OptionAdder::operator()
   case 1:
     short_name = *first_short_name_iter;
     option_names.erase(first_short_name_iter);
+    CXXOPTS_FALLTHROUGH;
   case 0:
     break;
   default:
@@ -2328,9 +2633,13 @@ OptionParser::checked_parse_arg
 
 inline
 void
-OptionParser::add_to_option(OptionMap::const_iterator iter, const std::string& option, const std::string& arg)
+OptionParser::add_to_option(const std::shared_ptr<OptionDetails>& value, const std::string& arg)
 {
-  parse_option(iter->second, option, arg);
+  auto hash = value->hash();
+  auto& result = m_parsed[hash];
+  result.add(value, arg);
+
+  m_sequential.emplace_back(value->essential_name(), arg);
 }
 
 inline
@@ -2347,14 +2656,14 @@ OptionParser::consume_positional(const std::string& a, PositionalListIterator& n
         auto& result = m_parsed[iter->second->hash()];
         if (result.count() == 0)
         {
-          add_to_option(iter, *next, a);
+          add_to_option(iter->second, a);
           ++next;
           return true;
         }
         ++next;
         continue;
       }
-      add_to_option(iter, *next, a);
+      add_to_option(iter->second, a);
       return true;
     }
     throw_or_mimic<exceptions::no_such_option>(*next);
@@ -2365,25 +2674,32 @@ OptionParser::consume_positional(const std::string& a, PositionalListIterator& n
 
 inline
 void
-Options::parse_positional(std::string option)
+Options::parse_positional(std::string option, PositionalMode mode)
 {
-  parse_positional(std::vector<std::string>{std::move(option)});
+  parse_positional(std::vector<std::string>{std::move(option)}, mode);
 }
 
 inline
 void
-Options::parse_positional(std::vector<std::string> options)
+Options::parse_positional(std::vector<std::string> options, PositionalMode mode)
 {
-  m_positional = std::move(options);
-
-  m_positional_set.insert(m_positional.begin(), m_positional.end());
+  switch(mode){
+    case PositionalMode::Replace:
+      m_positional = std::move(options);
+      m_positional_set = std::unordered_set<std::string>(m_positional.begin(), m_positional.end());
+      break;
+    case PositionalMode::Append:
+      m_positional.insert(m_positional.end(), options.begin(), options.end());
+      m_positional_set.insert(options.begin(), options.end());
+      break;
+  }
 }
 
 inline
 void
-Options::parse_positional(std::initializer_list<std::string> options)
+Options::parse_positional(std::initializer_list<std::string> options, PositionalMode mode)
 {
-  parse_positional(std::vector<std::string>(options));
+  parse_positional(std::vector<std::string>(options), mode);
 }
 
 inline
@@ -2404,7 +2720,7 @@ OptionParser::parse(int argc, const char* const* argv)
 
   std::vector<std::string> unmatched;
 
-  while (current != argc)
+  while (current < argc)
   {
     if (strcmp(argv[current], "--") == 0)
     {
@@ -2466,7 +2782,15 @@ OptionParser::parse(int argc, const char* const* argv)
           if (i + 1 == s.size())
           {
             //it must be the last argument
-            checked_parse_arg(argc, argv, current, value, name);
+            if (argu_desc.set_value) {
+              if(value->value().has_disabled_args()){
+                throw_or_mimic<exceptions::specified_disabled_args>(name);
+              }
+              parse_option(value, name, argu_desc.value);
+            }
+            else{
+              checked_parse_arg(argc, argv, current, value, name);
+            }
           }
           else if (value->value().has_implicit())
           {
@@ -2509,6 +2833,9 @@ OptionParser::parse(int argc, const char* const* argv)
         //equals provided for long option?
         if (argu_desc.set_value)
         {
+          if(opt->value().has_disabled_args()){
+            throw_or_mimic<exceptions::specified_disabled_args>(name);
+          }
           //parse the option given
 
           parse_option(opt, name, argu_desc.value);
@@ -2618,6 +2945,12 @@ Options::add_option
   }
 
   //add the help details
+
+  if (m_help.find(group) == m_help.end())
+  {
+    m_group.push_back(group);
+  }
+
   auto& options = m_help[group];
 
   options.options.emplace_back(HelpOptionDetails{s, l, stringDesc,
@@ -2650,17 +2983,17 @@ Options::help_one_group(const std::string& g) const
 {
   using OptionHelp = std::vector<std::pair<String, String>>;
 
+  String result;
+
   auto group = m_help.find(g);
   if (group == m_help.end())
   {
-    return "";
+    return result;
   }
 
   OptionHelp format;
 
   std::size_t longest = 0;
-
-  String result;
 
   if (!g.empty())
   {
@@ -2702,6 +3035,7 @@ Options::help_one_group(const std::string& g) const
     auto d = format_description(o, longest + OPTION_DESC_GAP, allowed, m_tab_expansion);
 
     result += fiter->first;
+
     if (stringLength(fiter->first) > longest)
     {
       result += '\n';
@@ -2749,19 +3083,7 @@ inline
 void
 Options::generate_all_groups_help(String& result) const
 {
-  std::vector<std::string> all_groups;
-
-  std::transform(
-    m_help.begin(),
-    m_help.end(),
-    std::back_inserter(all_groups),
-    [] (const std::map<std::string, HelpGroupDetails>::value_type& group)
-    {
-      return group.first;
-    }
-  );
-
-  generate_group_help(result, all_groups);
+  generate_group_help(result, m_group);
 }
 
 inline
@@ -2785,6 +3107,8 @@ Options::help(const std::vector<std::string>& help_groups, bool print_usage) con
 
   result += "\n\n";
 
+  result = wrap_text(result, m_width, 0);
+
   if (help_groups.empty())
   {
     generate_all_groups_help(result);
@@ -2801,19 +3125,7 @@ inline
 std::vector<std::string>
 Options::groups() const
 {
-  std::vector<std::string> g;
-
-  std::transform(
-    m_help.begin(),
-    m_help.end(),
-    std::back_inserter(g),
-    [] (const std::map<std::string, HelpGroupDetails>::value_type& pair)
-    {
-      return pair.first;
-    }
-  );
-
-  return g;
+  return m_group;
 }
 
 inline

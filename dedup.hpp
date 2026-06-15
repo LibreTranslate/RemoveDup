@@ -6,6 +6,7 @@
 #include <tuple>
 #include <variant>
 #include <string>
+#include <cstdint>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
