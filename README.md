@@ -26,7 +26,9 @@ print(src, tgt, removed)
 
 Source and target must have the same number of lines. No validation checks are made.
 
-Duplication checks are only made on the source content. If you want to check for duplicates on the target, simply switch the order of the parameters.
+Duplication checks are made both on the source and target content. E.g. duplication needs to appear on both source and target.
+
+This is a breaking change from versions < `1.1.0`.
 
 ## Build
 

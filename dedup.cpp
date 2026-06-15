@@ -64,7 +64,16 @@ std::tuple<std::string, std::string, size_t> dedup(const std::string &src, const
             line_end = ptr + 1;
             std::string_view line_view(line_start, line_end - line_start);
 
-            std::uint32_t hash = xxh32::hash(line_start, static_cast<uint32_t>(line_end - line_start), 0);
+            std::uint32_t hash_src = xxh32::hash(line_start, static_cast<uint32_t>(line_end - line_start), 0);
+
+            size_t tgt_len = line_buf.size();
+            while (tgt_len > 0 && (line_buf[tgt_len - 1] == '\r' || line_buf[tgt_len - 1] == '\n')) {
+                --tgt_len;
+            }
+            std::uint32_t hash_tgt = xxh32::hash(line_buf.data(), static_cast<uint32_t>(tgt_len), 0);
+            
+            // Blend two hashes into a single one
+            std::uint32_t hash = hash_src ^ (hash_tgt + 0x9e3779b9 + (hash_src << 6) + (hash_tgt >> 2));
             auto range = lines.equal_range(hash);
 
             bool line_exists = false;
